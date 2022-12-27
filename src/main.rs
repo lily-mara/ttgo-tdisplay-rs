@@ -1,15 +1,22 @@
-use std::{thread::sleep, time::Duration};
+use std::time::Instant;
 
+use display_interface::WriteOnlyDataCommand;
 use display_interface_spi::SPIInterfaceNoCS;
-use embedded_graphics::{draw_target::DrawTarget, pixelcolor::Rgb565, prelude::WebColors};
+use embedded_graphics::{
+    draw_target::DrawTarget,
+    pixelcolor::Rgb565,
+    prelude::*,
+    primitives::{PrimitiveStyleBuilder, Rectangle},
+};
+use embedded_hal::digital::v2::OutputPin;
 use esp_idf_hal::{
-    delay::Ets,
-    gpio::{AnyIOPin, Gpio16, Gpio18, Gpio19, Gpio23, Gpio5, PinDriver},
+    gpio::{AnyIOPin, Gpio16, Gpio18, Gpio19, Gpio23, Gpio4, Gpio5, PinDriver},
     peripheral::PeripheralRef,
-    spi::{config::Config, SpiDeviceDriver, SpiDriver, SPI2},
+    spi::{config::Config, Dma, SpiDeviceDriver, SpiDriver, SPI2},
+    units::{FromValueType, Hertz},
 };
 use esp_idf_sys as _; // If using the `binstart` feature of `esp-idf-sys`, always keep this module imported
-use mipidsi::Builder;
+use mipidsi::{models::Model, Builder, Display};
 
 fn main() {
     // It is necessary to call this function once. Otherwise some patches to the runtime
@@ -22,8 +29,18 @@ fn main() {
     }
 }
 
-fn run() -> Result<(), &'static str> {
-    let mut delay = Ets;
+const TFT_WIDTH: usize = 240;
+const TFT_HEIGHT: usize = 320;
+
+const BLUE: Rgb565 = Rgb565::new(91, 206, 250);
+const PINK: Rgb565 = Rgb565::new(245, 169, 184);
+const WHITE: Rgb565 = Rgb565::new(255, 255, 255);
+
+fn init_display() -> Result<
+    Display<impl WriteOnlyDataCommand, impl Model<ColorFormat = Rgb565>, impl OutputPin>,
+    &'static str,
+> {
+    let mut delay = esp_idf_hal::delay::FreeRtos;
 
     let sclk = unsafe { Gpio18::new() };
 
@@ -36,11 +53,18 @@ fn run() -> Result<(), &'static str> {
         sclk,
         sdo,
         None::<PeripheralRef<AnyIOPin>>,
-        esp_idf_hal::spi::Dma::Auto(0),
+        Dma::Channel1(TFT_WIDTH * TFT_HEIGHT * 2 + 8),
     )
     .map_err(|_| "create spi driver")?;
 
-    let device_driver = SpiDeviceDriver::new(driver, Some(cs), &Config::new())
+    let mut bl = PinDriver::input_output_od(unsafe { Gpio4::new() })
+        .map_err(|_| "gpio16: create pin driver")?;
+
+    bl.set_high().map_err(|_| "backlight")?;
+
+    let spi_config = Config::new().baudrate(24.MHz().into());
+
+    let device_driver = SpiDeviceDriver::new(driver, Some(cs), &spi_config)
         .map_err(|_| "create spi device driver")?;
 
     let dc = PinDriver::input_output_od(unsafe { Gpio16::new() })
@@ -53,11 +77,33 @@ fn run() -> Result<(), &'static str> {
         .init(&mut delay, Some(rst))
         .map_err(|_| "init display")?;
 
-    display
-        .clear(Rgb565::CSS_DARK_RED)
-        .map_err(|_| "clear display")?;
+    let start = Instant::now();
 
-    sleep(Duration::from_secs(100));
+    display.clear(Rgb565::BLACK).map_err(|_| "clear")?;
+    println!("clear {:?}", start.elapsed());
+
+    Ok(display)
+}
+
+fn run() -> Result<(), &'static str> {
+    let mut display = init_display()?;
+
+    let mut rect = Rectangle::new(Point::new(48, 0), Size::new(24, 320));
+
+    for color in [
+        Rgb565::CSS_AQUA,
+        Rgb565::CSS_HOT_PINK,
+        Rgb565::WHITE,
+        Rgb565::CSS_HOT_PINK,
+        Rgb565::CSS_AQUA,
+    ] {
+        let start = Instant::now();
+        display.fill_solid(&rect, color).map_err(|_| "draw")?;
+
+        println!("color {:?} {:?}", color, start.elapsed());
+
+        rect.translate_mut(Point::new(24, 0));
+    }
 
     Ok(())
 }
